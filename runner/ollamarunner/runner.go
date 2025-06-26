@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"strconv"
@@ -22,6 +23,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/image/bmp"
 	"golang.org/x/sync/semaphore"
 
@@ -975,10 +977,14 @@ func Execute(args []string) error {
 
 	mux.HandleFunc("POST /completion", server.completion)
 	mux.HandleFunc("GET /health", server.health)
+	mux.Handle("GET /metrics", promhttp.Handler())
 
 	httpServer := http.Server{
 		Handler: mux,
 	}
+
+	registerWithPrometheus(*port, *mpath)
+	defer unregisterFromPrometheus()
 
 	log.Println("Server listening on", addr)
 	if err := httpServer.Serve(listener); err != nil {
@@ -987,4 +993,38 @@ func Execute(args []string) error {
 	}
 
 	return nil
+}
+
+var prometheusDynamicConfigDir = os.Getenv("OLLAMA_PROM_CONFIG_DIR")
+var prometheusDynamicConfig = filepath.Join(prometheusDynamicConfigDir, "llama-server.json")
+
+type TargetGroup struct {
+	Targets []string          `json:"targets,omitempty"`
+	Labels  map[string]string `json:"labels,omitempty"`
+}
+
+func registerWithPrometheus(port int, modelPath string) {
+	if prometheusDynamicConfigDir == "" {
+		panic("OLLAMA_PROM_CONFIG_DIR is not configured")
+	}
+
+	b, err := json.Marshal([]TargetGroup{{
+		Targets: []string{fmt.Sprintf("127.0.0.1:%d", port)},
+		Labels: map[string]string{
+			"job":        "llama-server",
+			"model-path": modelPath,
+		},
+	}})
+	if err != nil {
+		panic(err)
+	}
+
+	err = os.WriteFile(prometheusDynamicConfig, b, 0644)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func unregisterFromPrometheus() {
+	_ = os.Remove(prometheusDynamicConfig)
 }

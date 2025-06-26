@@ -7,6 +7,8 @@ import (
 	"math"
 	"slices"
 
+	"github.com/prometheus/client_golang/prometheus"
+
 	"github.com/ollama/ollama/ml"
 	"github.com/ollama/ollama/model/input"
 )
@@ -71,6 +73,9 @@ type Causal struct {
 	backend      ml.Backend
 	ctxs         map[int]ml.Context
 	keys, values map[int]ml.Tensor
+
+	counterRequested prometheus.Counter
+	counterMissed    prometheus.Counter
 }
 
 type cacheCell struct {
@@ -83,34 +88,82 @@ type cellRange struct {
 	max int
 }
 
+var counterCausalRequested = prometheus.NewCounter(prometheus.CounterOpts{
+	Name:        "causal_cache_requested_total",
+	Help:        "Total number of cached requests",
+	ConstLabels: prometheus.Labels{"cache_type": "causal"},
+})
+
+var counterCausalMissed = prometheus.NewCounter(prometheus.CounterOpts{
+	Name:        "causal_cache_missed_total",
+	Help:        "Total number of missed requests",
+	ConstLabels: prometheus.Labels{"cache_type": "causal"},
+})
+
+var counterSwaRequested = prometheus.NewCounter(prometheus.CounterOpts{
+	Name:        "swa_cache_requested_total",
+	Help:        "Total number of cached requests",
+	ConstLabels: prometheus.Labels{"cache_type": "swa"},
+})
+
+var counterSwaMissed = prometheus.NewCounter(prometheus.CounterOpts{
+	Name:        "swa_cache_missed_total",
+	Help:        "Total number of missed requests",
+	ConstLabels: prometheus.Labels{"cache_type": "swa"},
+})
+
+var counterChunkedAttentionRequested = prometheus.NewCounter(prometheus.CounterOpts{
+	Name:        "chunked_attention_cache_requested_total",
+	Help:        "Total number of cached requests",
+	ConstLabels: prometheus.Labels{"cache_type": "chunked_attention"},
+})
+
+var counterChunkedAttentionMissed = prometheus.NewCounter(prometheus.CounterOpts{
+	Name:        "chunked_attention_cache_missed_total",
+	Help:        "Total number of missed requests",
+	ConstLabels: prometheus.Labels{"cache_type": "chunked_attention"},
+})
+
+func init() {
+	prometheus.MustRegister(counterCausalRequested, counterCausalMissed,
+		counterSwaRequested, counterSwaMissed,
+		counterChunkedAttentionRequested, counterChunkedAttentionMissed)
+}
+
 func NewCausalCache(shift shiftFn) *Causal {
 	return &Causal{
-		windowSize: math.MaxInt32,
-		shiftFn:    shift,
-		ctxs:       make(map[int]ml.Context),
-		keys:       make(map[int]ml.Tensor),
-		values:     make(map[int]ml.Tensor),
+		windowSize:       math.MaxInt32,
+		shiftFn:          shift,
+		ctxs:             make(map[int]ml.Context),
+		keys:             make(map[int]ml.Tensor),
+		values:           make(map[int]ml.Tensor),
+		counterRequested: counterCausalRequested,
+		counterMissed:    counterCausalMissed,
 	}
 }
 
 func NewSWACache(windowSize int32, shift shiftFn) *Causal {
 	return &Causal{
-		windowSize: windowSize,
-		shiftFn:    shift,
-		ctxs:       make(map[int]ml.Context),
-		keys:       make(map[int]ml.Tensor),
-		values:     make(map[int]ml.Tensor),
+		windowSize:       windowSize,
+		shiftFn:          shift,
+		ctxs:             make(map[int]ml.Context),
+		keys:             make(map[int]ml.Tensor),
+		values:           make(map[int]ml.Tensor),
+		counterRequested: counterSwaRequested,
+		counterMissed:    counterSwaMissed,
 	}
 }
 
 func NewChunkedAttentionCache(chunkSize int32, shift shiftFn) *Causal {
 	return &Causal{
-		windowSize: math.MaxInt32,
-		chunkSize:  chunkSize,
-		shiftFn:    shift,
-		ctxs:       make(map[int]ml.Context),
-		keys:       make(map[int]ml.Tensor),
-		values:     make(map[int]ml.Tensor),
+		windowSize:       math.MaxInt32,
+		chunkSize:        chunkSize,
+		shiftFn:          shift,
+		ctxs:             make(map[int]ml.Context),
+		keys:             make(map[int]ml.Tensor),
+		values:           make(map[int]ml.Tensor),
+		counterRequested: counterChunkedAttentionRequested,
+		counterMissed:    counterChunkedAttentionMissed,
 	}
 }
 
@@ -512,6 +565,8 @@ func (c *Causal) Get(ctx ml.Context) (ml.Tensor, ml.Tensor, ml.Tensor) {
 	rowSize := key.Stride(2)
 	cachedSize := c.curMask.Dim(0)
 
+	c.counterRequested.Add(float64(c.curBatchSize) * float64(cachedSize))
+
 	key = key.View(ctx, rowSize*c.curCellRange.min,
 		kHeadDim, key.Stride(1),
 		numKVHeads, key.Stride(2),
@@ -565,6 +620,10 @@ func (c *Causal) Put(ctx ml.Context, key, value ml.Tensor) {
 		} else {
 			c.values[c.curLayer] = c.ctxs[c.curLayer].Zeros(c.DType, vHeadDim, numKVHeads, len(c.cells))
 		}
+	}
+
+	if !c.curReserve && batchSize > 0 {
+		c.counterMissed.Add(float64(batchSize))
 	}
 
 	rowSize := c.keys[c.curLayer].Stride(2)
