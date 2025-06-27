@@ -304,7 +304,7 @@ func NewLlamaServer(gpus discover.GpuInfoList, modelPath string, f *ggml.GGML, a
 		textProcessor, err = model.NewTextProcessor(modelPath)
 		if err != nil {
 			// To prepare for opt-out mode, instead of treating this as an error, we fallback to the old runner
-			slog.Debug("model not yet supported by Ollama engine, switching to compatibility mode", "model", modelPath, "error", err)
+			slog.Warn("model not yet supported by Ollama engine, switching to compatibility mode", "model", modelPath, "error", err)
 		}
 	}
 	if textProcessor == nil {
