@@ -1012,7 +1012,7 @@ func registerWithPrometheus(port int, modelPath string) {
 		Targets: []string{fmt.Sprintf("127.0.0.1:%d", port)},
 		Labels: map[string]string{
 			"job":        "llama-server",
-			"model-path": modelPath,
+			"model_path": modelPath,
 		},
 	}})
 	if err != nil {
